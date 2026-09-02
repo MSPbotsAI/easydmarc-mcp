@@ -13,7 +13,14 @@ from .config import Settings
 # Per-request credential isolation via contextvars.
 # GatewayTokenMiddleware sets this before the MCP handler runs.
 # Python asyncio copies context per task, so concurrent SSE connections are isolated.
-_gateway_creds_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+#
+# Holds (client_id, client_secret) — NOT a bearer token. EasyDMARC's own
+# access tokens expire in ~5 minutes with no refresh (see api_client.py's
+# EasyDMARCClient docstring), which doesn't fit the platform's "operator
+# fills in credentials once, they're reused indefinitely" model. The
+# client_id/client_secret pair is EasyDMARC's actual long-lived credential;
+# EasyDMARCClient exchanges it for a fresh token on every call instead.
+_gateway_creds_var: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
     "easydmarc_gateway_creds", default=None
 )
 
@@ -21,21 +28,27 @@ _gateway_creds_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 def get_client_from_context(settings: Settings) -> EasyDMARCClient | None:
     """Resolve the active EasyDMARCClient for the current request context."""
     if settings.auth_mode == "gateway":
-        token = _gateway_creds_var.get()
+        creds = _gateway_creds_var.get()
     else:
-        token = settings.easydmarc_api_token
+        creds = (
+            (settings.easydmarc_client_id, settings.easydmarc_client_secret)
+            if settings.easydmarc_client_id and settings.easydmarc_client_secret
+            else None
+        )
 
-    if not token:
+    if not creds:
         return None
-    return EasyDMARCClient(token, settings.easydmarc_base_url)
+    client_id, client_secret = creds
+    return EasyDMARCClient(client_id, client_secret, settings.easydmarc_base_url)
 
 
 class GatewayTokenMiddleware:
     """ASGI middleware.
 
-    Reads the configured auth header (default X-EasyDMARC-Token) from each
-    request and stores the bearer token in the contextvar for the duration
-    of that request. Returns 401 if the header is missing on /mcp requests.
+    Reads the configured client-id/client-secret headers (default
+    X-EasyDMARC-Client-Id / X-EasyDMARC-Client-Secret) from each request and
+    stores the pair in the contextvar for the duration of that request.
+    Returns 401 if either header is missing on /mcp requests.
     """
 
     def __init__(self, app: ASGIApp, settings: Settings):
@@ -54,15 +67,18 @@ class GatewayTokenMiddleware:
 
         request = Request(scope)
         # Header lookup is case-insensitive in Starlette.
-        token = request.headers.get(self.settings.easydmarc_auth_header.lower())
-        if not token:
+        client_id = request.headers.get(self.settings.easydmarc_client_id_header.lower())
+        client_secret = request.headers.get(self.settings.easydmarc_client_secret_header.lower())
+        if not client_id or not client_secret:
+            required = [
+                self.settings.easydmarc_client_id_header,
+                self.settings.easydmarc_client_secret_header,
+            ]
             response = JSONResponse(
                 {
                     "error": "Missing credentials",
-                    "message": (
-                        f"This server requires the {self.settings.easydmarc_auth_header} header"
-                    ),
-                    "required_headers": [self.settings.easydmarc_auth_header],
+                    "message": f"This server requires the {', '.join(required)} headers",
+                    "required_headers": required,
                     "optional_headers": [],
                 },
                 status_code=401,
@@ -70,7 +86,7 @@ class GatewayTokenMiddleware:
             await response(scope, receive, send)
             return
 
-        ctx_token = _gateway_creds_var.set(token)
+        ctx_token = _gateway_creds_var.set((client_id, client_secret))
         try:
             await self.app(scope, receive, send)
         finally:
@@ -122,11 +138,13 @@ def create_mcp_server(settings: Settings) -> FastMCP:
             """
             return (
                 "Error: Missing EasyDMARC credentials.\n\n"
-                "Set the required environment variable:\n"
-                "  EASYDMARC_API_TOKEN=your_token_here\n\n"
-                "Or use gateway mode (per-request token):\n"
+                "Set the required environment variables:\n"
+                "  EASYDMARC_CLIENT_ID=your_client_id_here\n"
+                "  EASYDMARC_CLIENT_SECRET=your_client_secret_here\n\n"
+                "Or use gateway mode (per-request credentials):\n"
                 "  AUTH_MODE=gateway\n"
-                f"  Send header: {settings.easydmarc_auth_header}: your_token_here"
+                f"  Send headers: {settings.easydmarc_client_id_header}, "
+                f"{settings.easydmarc_client_secret_header}"
             )
 
         return mcp

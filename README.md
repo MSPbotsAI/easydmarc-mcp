@@ -10,8 +10,8 @@ public partner/MSP-tenant REST API as MCP tools.
 ## Overview
 
 - Stateless HTTP service. No credentials are ever persisted — each request
-  supplies its own bearer token via a header, used only for the lifetime
-  of that single request.
+  supplies its own client_id/client_secret via headers, used only to
+  exchange for a bearer token for the lifetime of that single request.
 - Supports concurrent requests; per-request credential isolation is done
   via Python `contextvars`, not a global/shared client instance.
 - Entry points: `POST /mcp` (MCP protocol) and `GET /health` (health check).
@@ -40,27 +40,40 @@ differently).
 
 ## Authentication
 
-EasyDMARC's public API authenticates with a bearer **JWT access token**
-(`Authorization: Bearer <token>`, obtained via EasyDMARC's own auth flow —
-see API Reference). This server accepts an already-issued token per
-request and forwards it exactly that way; it never performs its own
-OAuth/token exchange.
+EasyDMARC's public API authenticates with a bearer access token
+(`Authorization: Bearer <token>`), but that token comes from
+`POST /auth/token` exchanging a long-lived **client_id/client_secret**
+pair and is only valid for `expires_in` seconds (300 in EasyDMARC's own
+documented example) — `refresh_expires_in` is documented as *always 0*,
+i.e. there is no refresh, only re-requesting a new token.
+
+That doesn't fit a platform where an operator fills in credentials once and
+expects them to keep working: a ~5-minute token saved as "the credential"
+goes stale minutes after setup and every tool call 401s from then on. So
+this server accepts the **client_id/client_secret pair** instead (the
+credential that's actually long-lived) and does its own token exchange
+internally, once per API call, discarding the token immediately after —
+see `src/easydmarc_mcp/api_client.py` for the exact exchange and why it's
+never cached.
 
 ### HEADER 授权参数说明
 
 | Header | 类型 | 是否必填 | 默认值 | 枚举值 | 字段描述 | Example |
 |---|---|---|---|---|---|---|
-| `X-EasyDMARC-Token` | string | 是 | 无 | 无 | EasyDMARC bearer JWT access token，原样转发为上游 `Authorization: Bearer <token>` | `eyJhbGciOi...` |
+| `X-EasyDMARC-Client-Id` | string | 是 | 无 | 无 | EasyDMARC Account Console 里的 API Client ID（长期凭据） | `api.JRd7Z4qk...` |
+| `X-EasyDMARC-Client-Secret` | string | 是 | 无 | 无 | 对应的 API Client Secret（长期凭据） | `Szt832kHiY...` |
 
-Missing the header returns `401`:
+Missing either header returns `401`:
 ```json
 {
   "error": "Missing credentials",
-  "message": "This server requires the X-EasyDMARC-Token header",
-  "required_headers": ["X-EasyDMARC-Token"],
+  "message": "This server requires the X-EasyDMARC-Client-Id, X-EasyDMARC-Client-Secret headers",
+  "required_headers": ["X-EasyDMARC-Client-Id", "X-EasyDMARC-Client-Secret"],
   "optional_headers": []
 }
 ```
+
+**认证机制**：本服务收到这两个凭据后，自己去调 `POST https://api2.easydmarc.com/auth/token`（表单参数 `client_id`/`client_secret`，注意 token 端点的 host 跟业务 API 的 host 不是同一个——这是 EasyDMARC 官方 OpenAPI 规范里 `/auth/token` 路径的 `servers` 覆盖字段明确写的，不是猜的）换出真正的 bearer token，再拿这个 token 去调实际接口。**每次调用都重新换一次 token，从不缓存**——多租户场景下缓存 token 容易在并发请求间串号，多一次 HTTP 往返换取完全无状态是划算的取舍（`oitvoip-mcp`/`ingrammicro-mcp`/`action1-mcp` 都是这个模式）。
 
 ## Environment Variables
 
@@ -69,10 +82,12 @@ Missing the header returns `401`:
 | `MCP_TRANSPORT` | string | 否 | `stdio` | `http`（生产）或 `stdio`（本地开发） |
 | `MCP_HTTP_PORT` | int | 否 | `8080` | HTTP 监听端口 |
 | `MCP_HTTP_HOST` | string | 否 | `0.0.0.0` | HTTP 监听地址 |
-| `AUTH_MODE` | string | 否 | `gateway` | `gateway`（生产，逐请求从 Header 取 token）或 `env`（仅本地开发，共享单一 token） |
-| `EASYDMARC_API_TOKEN` | string | 仅 `env` 模式必填 | 无 | 共享 bearer token（仅本地开发） |
-| `EASYDMARC_BASE_URL` | string | 否 | `https://api.easydmarc.com` | EasyDMARC API 基础 URL |
-| `EASYDMARC_AUTH_HEADER` | string | 否 | `X-EasyDMARC-Token` | gateway 模式下承载 token 的 Header 名 |
+| `AUTH_MODE` | string | 否 | `gateway` | `gateway`（生产，逐请求从 Header 取凭据）或 `env`（仅本地开发，共享单一凭据） |
+| `EASYDMARC_CLIENT_ID` | string | 仅 `env` 模式必填 | 无 | 共享 Client ID（仅本地开发） |
+| `EASYDMARC_CLIENT_SECRET` | string | 仅 `env` 模式必填 | 无 | 共享 Client Secret（仅本地开发） |
+| `EASYDMARC_BASE_URL` | string | 否 | `https://api.easydmarc.com` | EasyDMARC 业务 API 基础 URL（token 交换固定走 `api2.easydmarc.com`，不受此项影响） |
+| `EASYDMARC_CLIENT_ID_HEADER` | string | 否 | `X-EasyDMARC-Client-Id` | gateway 模式下承载 Client ID 的 Header 名 |
+| `EASYDMARC_CLIENT_SECRET_HEADER` | string | 否 | `X-EasyDMARC-Client-Secret` | gateway 模式下承载 Client Secret 的 Header 名 |
 
 ## MCP Endpoint
 
@@ -120,7 +135,8 @@ curl -s http://localhost:8080/health
 # initialize handshake first per the MCP spec; abbreviated example below
 # shows the tool-call request body only:
 curl -s -X POST http://localhost:8080/mcp \
-  -H "X-EasyDMARC-Token: <your-easydmarc-bearer-token>" \
+  -H "X-EasyDMARC-Client-Id: <your-easydmarc-client-id>" \
+  -H "X-EasyDMARC-Client-Secret: <your-easydmarc-client-secret>" \
   -H "Content-Type: application/json" \
   -H "Accept: application/json, text/event-stream" \
   -H "mcp-session-id: <session-id-from-initialize>" \
@@ -143,6 +159,30 @@ curl -s -X POST http://localhost:8080/mcp \
 
 ## Known Gaps
 
+- **Auth model changed 2026-09-02, partially re-verified live.** This
+  server originally accepted an already-issued bearer token per request
+  (`X-EasyDMARC-Token`, forwarded verbatim). That was found to be
+  unworkable in real use: EasyDMARC's tokens expire in ~5 minutes with no
+  refresh (`refresh_expires_in` is documented as always `0`), while the
+  platform's credential model is "operator fills in credentials once,
+  reused indefinitely" — every deployment would start failing every tool
+  call with 401 a few minutes after setup. Fixed by accepting the
+  long-lived `client_id`/`client_secret` pair instead and having
+  `EasyDMARCClient` exchange it for a fresh token on every call (see
+  Authentication above and `api_client.py`'s docstring). The `/auth/token`
+  request/response shape and its `api2.easydmarc.com` host come from
+  EasyDMARC's own OpenAPI spec (`AuthTokenRequest`/`AuthTokenResponse`, the
+  `servers` override on that one path). **Partially live-verified
+  already**: running this server for real and calling a tool with a dummy
+  client_id/secret produced a genuine network round trip to
+  `https://api2.easydmarc.com/auth/token`, which answered with a real
+  `401 Unauthorized` (confirmed in both the tool's error envelope and the
+  server's own httpx request log) — proving host/path/form-encoding are
+  all correct and the endpoint is live, unlike the 404s the original
+  investigation got from every path under `api.easydmarc.com`. What's
+  still unconfirmed is the *success* path: no real client_id/client_secret
+  was available to verify `_login()` returns a usable `access_token` and
+  that a subsequent business-API call succeeds with it.
 - **⚠️ UNVERIFIED against a live deployment.** This build was written
   entirely from EasyDMARC's own published OpenAPI spec
   (`easydmarc/public-api-docs`), following the "verify against the real

@@ -34,14 +34,30 @@ def test_missing_header_returns_401_with_required_headers_listed():
         )
         assert resp.status_code == 401
         body = resp.json()
-        assert "X-EasyDMARC-Token" in body["required_headers"]
+        assert "X-EasyDMARC-Client-Id" in body["required_headers"]
+        assert "X-EasyDMARC-Client-Secret" in body["required_headers"]
+
+
+def test_missing_single_header_still_returns_401():
+    app, _ = _make_app()
+    with TestClient(app) as client:
+        resp = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}},
+            headers={
+                "Accept": "application/json, text/event-stream",
+                "X-EasyDMARC-Client-Id": "client-123",
+                # X-EasyDMARC-Client-Secret intentionally omitted
+            },
+        )
+        assert resp.status_code == 401
 
 
 def test_header_present_reaches_request_context():
     # Directly exercises the middleware's contextvar plumbing without a full
-    # MCP protocol round-trip: confirms the header value that arrives on the
-    # request is exactly what get_client_from_context sees, and that it's
-    # reset afterward (no leakage to the next request).
+    # MCP protocol round-trip: confirms the header values that arrive on the
+    # request are exactly what get_client_from_context sees, and that they
+    # are reset afterward (no leakage to the next request).
     import asyncio
 
     from easydmarc_mcp.server import GatewayTokenMiddleware, _gateway_creds_var
@@ -50,7 +66,7 @@ def test_header_present_reaches_request_context():
     seen = {}
 
     async def fake_app(scope, receive, send):
-        seen["token"] = _gateway_creds_var.get()
+        seen["creds"] = _gateway_creds_var.get()
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b""})
 
@@ -60,7 +76,10 @@ def test_header_present_reaches_request_context():
         scope = {
             "type": "http",
             "path": "/mcp",
-            "headers": [(b"x-easydmarc-token", b"test-token-123")],
+            "headers": [
+                (b"x-easydmarc-client-id", b"client-123"),
+                (b"x-easydmarc-client-secret", b"secret-456"),
+            ],
         }
 
         async def receive():
@@ -74,7 +93,7 @@ def test_header_present_reaches_request_context():
         await middleware(scope, receive, send)
 
     asyncio.run(run())
-    assert seen["token"] == "test-token-123"
+    assert seen["creds"] == ("client-123", "secret-456")
     # After the request completes, the contextvar must be reset — a fresh
     # get() outside any request context sees no leftover credential.
     assert _gateway_creds_var.get() is None

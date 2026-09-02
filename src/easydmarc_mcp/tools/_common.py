@@ -1,7 +1,10 @@
 from .._json import error_envelope
 
 NO_TOKEN = error_envelope(
-    "not_configured", "No EasyDMARC token. Send the X-EasyDMARC-Token header.", False
+    "not_configured",
+    "No EasyDMARC credentials. Send the X-EasyDMARC-Client-Id and "
+    "X-EasyDMARC-Client-Secret headers.",
+    False,
 )
 
 CONFIRM_DESC = "Required — must be set to true to proceed."

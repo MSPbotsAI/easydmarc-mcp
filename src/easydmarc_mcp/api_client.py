@@ -10,10 +10,19 @@ _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 _MAX_RETRIES = 3
 _MAX_BACKOFF_SECONDS = 20.0
 
+# The token endpoint lives on a different host than the resource API itself
+# — confirmed by the `servers` override on the /auth/token path in
+# EasyDMARC's own OpenAPI spec (easydmarc/public-api-docs), not a guess.
+_AUTH_URL = "https://api2.easydmarc.com/auth/token"
+
 # One shared connection pool for the process lifetime. No credentials are
-# ever stored on it — the bearer token is passed per-request via headers, so
-# this is safe to share across tenants/requests (see server.py's contextvar-
-# based credential isolation, which is what actually keeps tenants apart).
+# ever stored on it — client_id/client_secret are passed per-call and used
+# only to perform a fresh token exchange for that call (see
+# EasyDMARCClient._login), and the resulting bearer token is attached
+# per-request via a header rather than carried as client-level state. This
+# makes sharing the pool across tenants/requests safe (see server.py's
+# contextvar-based credential isolation, which is what actually keeps
+# tenants apart).
 _http_client: httpx.AsyncClient | None = None
 
 
@@ -61,20 +70,53 @@ class EasyDMARCClient:
 
     Reuses the module-level connection pool (see _get_http_client) across
     every call made through this instance, rather than opening a new
-    connection per request. Auth is a bearer JWT access token, forwarded
-    exactly as EasyDMARC's own API expects (`Authorization: Bearer <token>`).
+    connection per request.
+
+    Auth: EasyDMARC's `POST /auth/token` (client_credentials-shaped, per its
+    own OpenAPI spec — `AuthTokenRequest`/`AuthTokenResponse`) exchanges a
+    long-lived client_id/client_secret pair for a bearer access token good
+    for `expires_in` seconds (300 in EasyDMARC's own documented example) —
+    and `refresh_expires_in` is documented as *always 0*: EasyDMARC does not
+    support refreshing a token, only re-requesting a new one. A ~5-minute
+    token cannot be the thing an operator pastes into the platform once and
+    reuses indefinitely (every tool call would 401 shortly after setup); the
+    client_id/client_secret pair is the actual long-lived credential, so
+    that's what this server accepts and stores. This client deliberately
+    never caches the resulting token: every call performs a fresh exchange
+    and discards it afterward, trading one extra HTTP round trip per call
+    for full statelessness (same "re-login every call" pattern as
+    oitvoip-mcp/ingrammicro-mcp/action1-mcp) — a cached token would also
+    have to be keyed per-tenant to avoid leaking one tenant's token to
+    another's request, which a stateless per-call exchange sidesteps
+    entirely.
     """
 
-    def __init__(self, api_token: str, base_url: str):
-        self._token = api_token
+    def __init__(self, client_id: str, client_secret: str, base_url: str):
+        self._client_id = client_id
+        self._client_secret = client_secret
         self._base_url = base_url.rstrip("/")
 
-    def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self._token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
+    async def _login(self) -> str:
+        client = _get_http_client()
+        try:
+            resp = await client.post(
+                _AUTH_URL,
+                data={"client_id": self._client_id, "client_secret": self._client_secret},
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Accept": "application/json",
+                },
+            )
+        except httpx.RequestError as e:
+            raise EasyDMARCError(0, f"{e or type(e).__name__} (token exchange)") from e
+
+        if resp.status_code >= 400:
+            raise EasyDMARCError(resp.status_code, self._extract_error(resp))
+        body = self._parse_body(resp)
+        token = (body or {}).get("access_token") if isinstance(body, dict) else None
+        if not token:
+            raise EasyDMARCError(0, "Token exchange succeeded but response had no access_token")
+        return token
 
     def _clean_params(self, params: dict | None) -> dict:
         if not params:
@@ -96,9 +138,14 @@ class EasyDMARCClient:
     async def _request(
         self, method: str, path: str, params: dict | None = None, json_body: Any = None
     ) -> Any:
+        token = await self._login()
         client = _get_http_client()
         url = f"{self._base_url}{path}"
-        headers = self._headers()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
         params = self._clean_params(params)
 
         last_exc: Exception | None = None
@@ -145,14 +192,15 @@ class EasyDMARCClient:
         except ValueError:
             return {"raw_response": resp.text}
 
+    def _extract_error(self, resp: httpx.Response) -> str:
+        try:
+            detail = resp.json()
+            if isinstance(detail, dict):
+                return str(detail.get("message") or detail.get("error") or detail)
+            return str(detail)
+        except ValueError:
+            return resp.text
+
     def _raise_for_status(self, resp: httpx.Response) -> None:
         if resp.status_code >= 400:
-            try:
-                detail = resp.json()
-                if isinstance(detail, dict):
-                    msg = detail.get("message") or detail.get("error") or str(detail)
-                else:
-                    msg = str(detail)
-            except ValueError:
-                msg = resp.text
-            raise EasyDMARCError(resp.status_code, str(msg))
+            raise EasyDMARCError(resp.status_code, self._extract_error(resp))
