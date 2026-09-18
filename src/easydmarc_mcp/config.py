@@ -28,7 +28,14 @@ class Settings(BaseSettings):
     # instead of accepting an already-issued token (see api_client.py).
     easydmarc_client_id: str | None = None
     easydmarc_client_secret: str | None = None
-    easydmarc_base_url: str = "https://api.easydmarc.com"
+    # EasyDMARC serves the entire public API from api2.easydmarc.com — every
+    # one of the 95 paths in the vendor's own OpenAPI document
+    # (easydmarc/public-api-docs, specs/easydmarc-openapi.json) declares
+    # `servers: https://api2.easydmarc.com`, including /auth/token. The
+    # api.easydmarc.com host answers, but has none of these routes registered
+    # and returns an Express 404 ("Cannot GET /v1/organizations") for all of
+    # them — which this server previously surfaced as a not_found envelope.
+    easydmarc_base_url: str = "https://api2.easydmarc.com"
 
     # Header names used to pass client_id/client_secret in gateway mode.
     # The client must include both headers on every /mcp request.

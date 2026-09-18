@@ -18,6 +18,7 @@ EXPECTED_TOOLS = {
     "easydmarc_get_organization": ({"organization_id"}, {"readOnlyHint"}),
     # domains
     "easydmarc_list_domains": ({"organization_id"}, {"readOnlyHint"}),
+    "easydmarc_get_domains_overview": ({"organization_id"}, {"readOnlyHint"}),
     "easydmarc_get_domain": ({"organization_id", "domain"}, {"readOnlyHint"}),
     "easydmarc_create_domain": ({"organization_id", "domain"}, set()),
     "easydmarc_update_domain": ({"domain"}, {"idempotentHint"}),
@@ -172,3 +173,75 @@ async def test_delete_domain_rejects_without_confirm():
     text = content[0].text if isinstance(content, list) else str(content)
     assert "invalid_argument" in text
     assert "called" not in captured
+
+
+def test_base_url_points_at_the_host_that_serves_the_api():
+    """Regression guard for the 404 that made every business tool unusable.
+
+    EasyDMARC serves all 95 documented paths — including /auth/token — from
+    api2.easydmarc.com. api.easydmarc.com resolves but has none of the
+    routes registered and answers with an Express 404, which this server
+    reported as a not_found envelope.
+    """
+    assert Settings().easydmarc_base_url == "https://api2.easydmarc.com"
+
+
+@pytest.mark.asyncio
+async def test_domains_overview_builds_expected_body():
+    """The overview endpoint is a POST whose every input travels in the body.
+
+    Also pins pageSize being sent explicitly: EasyDMARC's own default is 1
+    record per page, so omitting it would silently truncate the census.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    from easydmarc_mcp.tools import domains
+
+    captured = {}
+
+    class _StubClient:
+        async def post(self, path, params=None, json_body=None):
+            captured["path"] = path
+            captured["body"] = json_body
+            return {"data": [], "meta": {"total": 0}}
+
+    mcp = FastMCP(name="test")
+    domains.register(mcp, lambda: _StubClient())
+    await mcp.call_tool(
+        "easydmarc_get_domains_overview",
+        {
+            "organization_id": "org_1",
+            "start_date": "2026-08-01T00:00:00.000Z",
+            "end_date": "2026-09-01T00:00:00.000Z",
+        },
+    )
+    assert captured["path"] == "/v1/domains/overview"
+    assert captured["body"] == {
+        "organizationId": "org_1",
+        "page": 1,
+        "pageSize": 20,
+        "startDate": "2026-08-01T00:00:00.000Z",
+        "endDate": "2026-09-01T00:00:00.000Z",
+    }
+
+
+@pytest.mark.asyncio
+async def test_domains_overview_omits_unset_optionals():
+    """Unset optionals must not be sent as nulls — the date range is a
+    reporting window, and an explicit null is not the same as absent.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    from easydmarc_mcp.tools import domains
+
+    captured = {}
+
+    class _StubClient:
+        async def post(self, path, params=None, json_body=None):
+            captured["body"] = json_body
+            return {"data": []}
+
+    mcp = FastMCP(name="test")
+    domains.register(mcp, lambda: _StubClient())
+    await mcp.call_tool("easydmarc_get_domains_overview", {"organization_id": "org_1"})
+    assert set(captured["body"]) == {"organizationId", "page", "pageSize"}

@@ -97,18 +97,39 @@ class EasyDMARCClient:
         self._base_url = base_url.rstrip("/")
 
     async def _login(self) -> str:
+        # A token is minted before *every* business call, so the token
+        # endpoint is the hottest path in this service — it gets the same
+        # bounded retry/backoff treatment as the business leg below, rather
+        # than failing the whole tool call on a single transient 429/5xx.
         client = _get_http_client()
-        try:
-            resp = await client.post(
-                _AUTH_URL,
-                data={"client_id": self._client_id, "client_secret": self._client_secret},
-                headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
-                    "Accept": "application/json",
-                },
-            )
-        except httpx.RequestError as e:
-            raise EasyDMARCError(0, f"{e or type(e).__name__} (token exchange)") from e
+        last_exc: Exception | None = None
+        resp: httpx.Response | None = None
+        for attempt in range(_MAX_RETRIES + 1):
+            try:
+                resp = await client.post(
+                    _AUTH_URL,
+                    data={"client_id": self._client_id, "client_secret": self._client_secret},
+                    headers={
+                        "Content-Type": "application/x-www-form-urlencoded",
+                        "Accept": "application/json",
+                    },
+                )
+            except httpx.RequestError as e:
+                last_exc = e
+                if attempt < _MAX_RETRIES:
+                    await asyncio.sleep(min(2**attempt, _MAX_BACKOFF_SECONDS))
+                    continue
+                raise EasyDMARCError(0, f"{e or type(e).__name__} (token exchange)") from e
+
+            if resp.status_code in _RETRYABLE_STATUS and attempt < _MAX_RETRIES:
+                await asyncio.sleep(self._retry_delay(resp, attempt))
+                continue
+            break
+
+        if resp is None:
+            # Unreachable in practice (the loop always assigns, returns or
+            # raises), but keeps type checkers happy against future edits.
+            raise EasyDMARCError(0, f"{last_exc}" if last_exc else "token exchange failed")
 
         if resp.status_code >= 400:
             raise EasyDMARCError(resp.status_code, self._extract_error(resp))

@@ -25,6 +25,18 @@ _DOMAIN_TYPE_DESC = (
     '"sending" — this domain sends mail and should be DMARC-enforced; '
     '"parked" — this domain never sends mail (should reject all mail via SPF/DMARC).'
 )
+_OVERVIEW_DATE_DESC = (
+    'ISO 8601 timestamp, e.g. "2026-08-01T00:00:00.000Z". Bounds the '
+    "reporting window for volume and pass rates."
+)
+_OVERVIEW_FILTERS_DESC = (
+    'Optional filter, either one condition {"field": <name>, "operator": '
+    '"eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"in"|"nin"|"starts_with"|"ends_with"|'
+    '"contains", "value": <match value>}, a list of them, or a nested group '
+    '{"operator": "AND"|"OR", "conditions": [...]}. Shape differs from the '
+    "rua report tools' filters. EasyDMARC validates it and returns a "
+    "structured error on a bad filter."
+)
 
 
 def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None]) -> None:
@@ -45,6 +57,54 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
                 "/v1/domains",
                 params={"organizationId": organization_id, "page": page, "pageSize": page_size},
             )
+            return dump_json_capped(result)
+        except EasyDMARCError as e:
+            return e.to_envelope()
+
+    @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
+    async def easydmarc_get_domains_overview(
+        organization_id: Annotated[str, Field(description=_ORG_ID_DESC)],
+        start_date: Annotated[str | None, Field(description=_OVERVIEW_DATE_DESC)] = None,
+        end_date: Annotated[str | None, Field(description=_OVERVIEW_DATE_DESC)] = None,
+        page: Annotated[int, Field(description="Page number, 1-based.", ge=1)] = 1,
+        page_size: Annotated[
+            int,
+            Field(
+                description=(
+                    "Items per page (max 100). Always send this — EasyDMARC's own "
+                    "default is 1 record per page."
+                ),
+                ge=1,
+                le=100,
+            ),
+        ] = 20,
+        filters: Annotated[
+            dict | list | None, Field(description=_OVERVIEW_FILTERS_DESC)
+        ] = None,
+    ) -> str:
+        """List domains with DMARC policy plus SPF/DKIM/DMARC/BIMI record status.
+
+        Use this rather than easydmarc_list_domains whenever record
+        validation status, mail volume, pass rates or DMARC compliance
+        matter — list_domains carries onboarding fields only and has no
+        record statuses at all.
+        """
+        client = client_factory()
+        if client is None:
+            return NO_TOKEN
+        body: dict = {
+            "organizationId": organization_id,
+            "page": page,
+            "pageSize": page_size,
+        }
+        if start_date is not None:
+            body["startDate"] = start_date
+        if end_date is not None:
+            body["endDate"] = end_date
+        if filters is not None:
+            body["filters"] = filters
+        try:
+            result = await client.post("/v1/domains/overview", json_body=body)
             return dump_json_capped(result)
         except EasyDMARCError as e:
             return e.to_envelope()

@@ -19,14 +19,14 @@ public partner/MSP-tenant REST API as MCP tools.
 
 ## Scope
 
-**24 tools**, an MVP subset of EasyDMARC's ~95-endpoint public API (see
+**25 tools**, an MVP subset of EasyDMARC's ~95-endpoint public API (see
 [API Reference](#api-reference)), scoped by explicit decision to the
 email-authentication-specific surface an MSP agent actually needs:
 
 | Category | Count | Covers |
 |---|---|---|
 | `organizations` | 2 | List/get client organizations (the partner-tenant scoping entry point) |
-| `domains` | 7 | Onboard/list/get/update/delete a domain, get/verify its DMARC DNS setup |
+| `domains` | 8 | Onboard/list/get/update/delete a domain, per-domain record-status overview, get/verify its DMARC DNS setup |
 | DNS lookup | 7 | Live DMARC/SPF/DKIM/BIMI/MTA-STS/TLS-RPT record checks |
 | `rua` (aggregate reports) | 5 | Report history, auth pass-rates, volume, volume-over-time |
 | `failure-reports` (RUF) | 3 | Forensic failure report list/detail/aggregates |
@@ -85,7 +85,7 @@ Missing either header returns `401`:
 | `AUTH_MODE` | string | 否 | `gateway` | `gateway`（生产，逐请求从 Header 取凭据）或 `env`（仅本地开发，共享单一凭据） |
 | `EASYDMARC_CLIENT_ID` | string | 仅 `env` 模式必填 | 无 | 共享 Client ID（仅本地开发） |
 | `EASYDMARC_CLIENT_SECRET` | string | 仅 `env` 模式必填 | 无 | 共享 Client Secret（仅本地开发） |
-| `EASYDMARC_BASE_URL` | string | 否 | `https://api.easydmarc.com` | EasyDMARC 业务 API 基础 URL（token 交换固定走 `api2.easydmarc.com`，不受此项影响） |
+| `EASYDMARC_BASE_URL` | string | 否 | `https://api2.easydmarc.com` | EasyDMARC 业务 API 基础 URL。整个公开 API（含 token 交换）都由 `api2.easydmarc.com` 提供服务；`api.easydmarc.com` 能解析但没有注册任何路由 |
 | `EASYDMARC_CLIENT_ID_HEADER` | string | 否 | `X-EasyDMARC-Client-Id` | gateway 模式下承载 Client ID 的 Header 名 |
 | `EASYDMARC_CLIENT_SECRET_HEADER` | string | 否 | `X-EasyDMARC-Client-Secret` | gateway 模式下承载 Client Secret 的 Header 名 |
 
@@ -101,6 +101,7 @@ Missing either header returns `401`:
 | organizations | `easydmarc_list_organizations` | 列出该 partner 下的客户组织 | GET /v1/organizations | page, limit, order |
 | organizations | `easydmarc_get_organization` | 按 ID 获取一个组织详情 | GET /v1/organizations/{id} | organization_id(必填) |
 | domains | `easydmarc_list_domains` | 列出某组织下已接入的域名 | GET /v1/domains | organization_id(必填), page, page_size |
+| domains | `easydmarc_get_domains_overview` | 列出域名并附带 DMARC policy 与 SPF/DKIM/DMARC/BIMI 记录校验状态、流量与合规率 | POST /v1/domains/overview | organization_id(必填), start_date, end_date, page, page_size, filters |
 | domains | `easydmarc_get_domain` | 获取单个域名的接入详情 | GET /v1/domains/{domain} | organization_id(必填), domain(必填) |
 | domains | `easydmarc_create_domain` | 接入新域名 | POST /v1/domains | organization_id(必填), domain(必填), type, group_id |
 | domains | `easydmarc_update_domain` | 部分更新域名类型/分组 | PATCH /v1/domains/{domain} | domain(必填), domain_name, type, group_id |
@@ -183,24 +184,31 @@ curl -s -X POST http://localhost:8080/mcp \
   still unconfirmed is the *success* path: no real client_id/client_secret
   was available to verify `_login()` returns a usable `access_token` and
   that a subsequent business-API call succeeds with it.
-- **⚠️ UNVERIFIED against a live deployment.** This build was written
-  entirely from EasyDMARC's own published OpenAPI spec
+- **Base URL was wrong until 2026-09-18 — every business tool 404'd.**
+  `EASYDMARC_BASE_URL` defaulted to `https://api.easydmarc.com`, which
+  resolves and serves an `EasyDMARC Public API v1` banner at `/v1` but has
+  none of the documented routes registered, so every path answered with a
+  plain Express `Cannot GET/POST <path>` 404 — surfaced by this server as a
+  `not_found` envelope. The cause is now settled: **all 95 paths in
+  EasyDMARC's own OpenAPI document declare `servers:
+  https://api2.easydmarc.com`**, including `/auth/token`. Only the token
+  URL had been hard-coded to that host, which is why auth worked and
+  nothing else did. The default is now `https://api2.easydmarc.com`;
+  `tests/test_tools.py::test_base_url_points_at_the_host_that_serves_the_api`
+  guards it. Reported as a `easydmarc_list_organizations` 404 (PRD-19087),
+  but it affected all 24 business tools equally.
+- **⚠️ The success path is still unverified against a live account.** This
+  build was written entirely from EasyDMARC's own published OpenAPI spec
   (`easydmarc/public-api-docs`), following the "verify against the real
-  spec, not impression" rule — but no call in this codebase has been
-  exercised against a real, authenticated EasyDMARC account. Live probing
-  during development found every documented path under
-  `https://api.easydmarc.com` (including ones needing no auth) returns a
-  plain Express `Cannot GET/POST <path>` 404 — while the bare `/v1` root
-  does respond with an `EasyDMARC Public API v1` banner, confirming the
-  host is real but suggesting these specific routes are not registered on
-  it. This may mean the spec describes endpoints ahead of what's actually
-  deployed (one endpoint's own description literally says "Not available
-  yet" — see `easydmarc_verify_domain_setup`), or that a real API key/
-  account is required to discover the correct base URL (EasyDMARC's own
-  support article says the Public API documentation link only appears
-  after clicking "Generate Key" inside the app). **Needs re-verification
-  with a real EasyDMARC API token before being treated as functionally
-  correct**, not just schema-correct.
+  spec, not impression" rule. The token exchange is confirmed live — a
+  dummy client_id/secret produces a genuine round trip to
+  `https://api2.easydmarc.com/auth/token` answering `401 Unauthorized` —
+  but no real client_id/client_secret has been available to confirm that
+  `_login()` returns a usable `access_token` and that a business call
+  succeeds with it. One endpoint's own description literally says "Not
+  available yet" (see `easydmarc_verify_domain_setup`). **Needs one live
+  authenticated run before being treated as functionally correct**, not
+  just schema-correct.
 - **MVP-scoped by explicit decision**, not a full port of the ~95-endpoint
   spec: cut generic DNS record types (A/AAAA/MX/NS/PTR/TXT/CNAME — any DNS
   tool can resolve these, not EasyDMARC-specific), the newer "DNS
@@ -221,7 +229,7 @@ curl -s -X POST http://localhost:8080/mcp \
   `easydmarc_get_failure_report`'s `downloadUrls` include option returns
   the URLs, but this MCP does not fetch them.
 - **No tool has been individually smoke-tested against live data** — all
-  24 are structurally correct (`tools/list` confirmed via the real MCP
-  protocol, 16 unit tests passing, ruff-clean), but given the base-URL/
-  route-availability question above, none should be assumed to work
-  end-to-end until re-verified with a real account.
+  25 are structurally correct (`tools/list` confirmed via the real MCP
+  protocol, 20 unit tests passing, ruff-clean), and the base-URL defect
+  that made them all 404 is fixed, but none should be assumed to work
+  end-to-end until verified with a real account.
