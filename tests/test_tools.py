@@ -18,7 +18,10 @@ EXPECTED_TOOLS = {
     "easydmarc_get_organization": ({"organization_id"}, {"readOnlyHint"}),
     # domains
     "easydmarc_list_domains": ({"organization_id"}, {"readOnlyHint"}),
-    "easydmarc_get_domains_overview": ({"organization_id"}, {"readOnlyHint"}),
+    "easydmarc_get_domains_overview": (
+        {"organization_id", "start_date", "end_date"},
+        {"readOnlyHint"},
+    ),
     "easydmarc_get_domain": ({"organization_id", "domain"}, {"readOnlyHint"}),
     "easydmarc_create_domain": ({"organization_id", "domain"}, set()),
     "easydmarc_update_domain": ({"domain"}, {"idempotentHint"}),
@@ -211,8 +214,8 @@ async def test_domains_overview_builds_expected_body():
         "easydmarc_get_domains_overview",
         {
             "organization_id": "org_1",
-            "start_date": "2026-08-01T00:00:00.000Z",
-            "end_date": "2026-09-01T00:00:00.000Z",
+            "start_date": "08/01/2026",
+            "end_date": "09/01/2026",
         },
     )
     assert captured["path"] == "/v1/domains/overview"
@@ -220,15 +223,16 @@ async def test_domains_overview_builds_expected_body():
         "organizationId": "org_1",
         "page": 1,
         "pageSize": 20,
-        "startDate": "2026-08-01T00:00:00.000Z",
-        "endDate": "2026-09-01T00:00:00.000Z",
+        "startDate": "08/01/2026",
+        "endDate": "09/01/2026",
     }
 
 
 @pytest.mark.asyncio
-async def test_domains_overview_omits_unset_optionals():
-    """Unset optionals must not be sent as nulls — the date range is a
-    reporting window, and an explicit null is not the same as absent.
+async def test_domains_overview_sends_only_the_documented_body_keys():
+    """filters is the only genuinely optional key. startDate/endDate are
+    required by EasyDMARC (422 "Start date is required" without them),
+    despite its OpenAPI document typing them as plain optional strings.
     """
     from mcp.server.fastmcp import FastMCP
 
@@ -243,5 +247,14 @@ async def test_domains_overview_omits_unset_optionals():
 
     mcp = FastMCP(name="test")
     domains.register(mcp, lambda: _StubClient())
-    await mcp.call_tool("easydmarc_get_domains_overview", {"organization_id": "org_1"})
-    assert set(captured["body"]) == {"organizationId", "page", "pageSize"}
+    await mcp.call_tool(
+        "easydmarc_get_domains_overview",
+        {"organization_id": "org_1", "start_date": "08/01/2026", "end_date": "09/01/2026"},
+    )
+    assert set(captured["body"]) == {
+        "organizationId",
+        "startDate",
+        "endDate",
+        "page",
+        "pageSize",
+    }

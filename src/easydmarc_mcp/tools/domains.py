@@ -25,17 +25,27 @@ _DOMAIN_TYPE_DESC = (
     '"sending" — this domain sends mail and should be DMARC-enforced; '
     '"parked" — this domain never sends mail (should reject all mail via SPF/DMARC).'
 )
+# EasyDMARC rejects anything else with a 422 naming the expected format —
+# notably NOT the ISO-8601 the rest of this API uses, and not what the
+# published OpenAPI document implies (it types these as a bare string and
+# does not mark them required). Verified live 2026-09-18.
 _OVERVIEW_DATE_DESC = (
-    'ISO 8601 timestamp, e.g. "2026-08-01T00:00:00.000Z". Bounds the '
-    "reporting window for volume and pass rates."
+    'Required. MM/DD/YYYY, e.g. "08/01/2026" — not ISO 8601. Bounds the '
+    "window for volume, pass rates and compliance; the record statuses are "
+    "current state and do not move with it."
 )
 _OVERVIEW_FILTERS_DESC = (
-    'Optional filter, either one condition {"field": <name>, "operator": '
-    '"eq"|"neq"|"gt"|"gte"|"lt"|"lte"|"in"|"nin"|"starts_with"|"ends_with"|'
-    '"contains", "value": <match value>}, a list of them, or a nested group '
-    '{"operator": "AND"|"OR", "conditions": [...]}. Shape differs from the '
-    "rua report tools' filters. EasyDMARC validates it and returns a "
-    "structured error on a bad filter."
+    'Optional. One condition {"field": <name>, "operator": "eq"|"neq"|"gt"|'
+    '"gte"|"lt"|"lte"|"in"|"nin"|"starts_with"|"ends_with"|"contains", '
+    '"value": <v>}, or a group {"operator": "AND"|"OR", "conditions": [...]}. '
+    'Fields: domain_name, domain_group_name, domain_type ("sending"/'
+    '"parked"), labels, policy, compliance_rate, dmarc_progress_level, '
+    "dmarc_lookup_status, spf_lookup_status, dkim_lookup_status, "
+    "bimi_lookup_status, dkim_pass_rate, spf_pass_rate, count, alert_count, "
+    "is_domain_verified, has_managed_dmarc, has_managed_bimi, "
+    "has_managed_mta_sts, has_managed_dkim, has_dns_integration, "
+    "has_failure_reports, has_easy_spf, adder_name, created_at. Note this "
+    "differs from the rua report tools' filter shape."
 )
 
 
@@ -64,8 +74,8 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def easydmarc_get_domains_overview(
         organization_id: Annotated[str, Field(description=_ORG_ID_DESC)],
-        start_date: Annotated[str | None, Field(description=_OVERVIEW_DATE_DESC)] = None,
-        end_date: Annotated[str | None, Field(description=_OVERVIEW_DATE_DESC)] = None,
+        start_date: Annotated[str, Field(description=_OVERVIEW_DATE_DESC)],
+        end_date: Annotated[str, Field(description=_OVERVIEW_DATE_DESC)],
         page: Annotated[int, Field(description="Page number, 1-based.", ge=1)] = 1,
         page_size: Annotated[
             int,
@@ -84,23 +94,22 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
     ) -> str:
         """List domains with DMARC policy plus SPF/DKIM/DMARC/BIMI record status.
 
-        Use this rather than easydmarc_list_domains whenever record
-        validation status, mail volume, pass rates or DMARC compliance
-        matter — list_domains carries onboarding fields only and has no
-        record statuses at all.
+        Use rather than easydmarc_list_domains whenever record validation
+        status, volume, pass rates or DMARC compliance matter —
+        list_domains has none of those. Returns camelCase fields
+        (domainName, spfPassRate, dmarcCompliance) and paginates with a
+        real meta.total.
         """
         client = client_factory()
         if client is None:
             return NO_TOKEN
         body: dict = {
             "organizationId": organization_id,
+            "startDate": start_date,
+            "endDate": end_date,
             "page": page,
             "pageSize": page_size,
         }
-        if start_date is not None:
-            body["startDate"] = start_date
-        if end_date is not None:
-            body["endDate"] = end_date
         if filters is not None:
             body["filters"] = filters
         try:

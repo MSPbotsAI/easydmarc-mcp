@@ -101,7 +101,7 @@ Missing either header returns `401`:
 | organizations | `easydmarc_list_organizations` | 列出该 partner 下的客户组织 | GET /v1/organizations | page, limit, order |
 | organizations | `easydmarc_get_organization` | 按 ID 获取一个组织详情 | GET /v1/organizations/{id} | organization_id(必填) |
 | domains | `easydmarc_list_domains` | 列出某组织下已接入的域名 | GET /v1/domains | organization_id(必填), page, page_size |
-| domains | `easydmarc_get_domains_overview` | 列出域名并附带 DMARC policy 与 SPF/DKIM/DMARC/BIMI 记录校验状态、流量与合规率 | POST /v1/domains/overview | organization_id(必填), start_date, end_date, page, page_size, filters |
+| domains | `easydmarc_get_domains_overview` | 列出域名并附带 DMARC policy 与 SPF/DKIM/DMARC/BIMI 记录校验状态、流量与合规率 | POST /v1/domains/overview | organization_id(必填), start_date(必填, MM/DD/YYYY), end_date(必填, MM/DD/YYYY), page, page_size, filters |
 | domains | `easydmarc_get_domain` | 获取单个域名的接入详情 | GET /v1/domains/{domain} | organization_id(必填), domain(必填) |
 | domains | `easydmarc_create_domain` | 接入新域名 | POST /v1/domains | organization_id(必填), domain(必填), type, group_id |
 | domains | `easydmarc_update_domain` | 部分更新域名类型/分组 | PATCH /v1/domains/{domain} | domain(必填), domain_name, type, group_id |
@@ -233,3 +233,47 @@ curl -s -X POST http://localhost:8080/mcp \
   protocol, 20 unit tests passing, ruff-clean), and the base-URL defect
   that made them all 404 is fixed, but none should be assumed to work
   end-to-end until verified with a real account.
+
+## Verified API behaviour (live, 2026-09-18)
+
+First run against a real authenticated account (1 organization, 56 domains).
+Two things diverge from EasyDMARC's published OpenAPI document — trust this
+section over the spec where they disagree.
+
+- **`/v1/domains/overview` dates are `MM/DD/YYYY` and both are required.**
+  The spec types `startDate`/`endDate` as plain optional strings; the API
+  returns `422` with `"startDate must be in MM/DD/YYYY format"` and
+  `"Start date is required"`. ISO-8601 — which every other endpoint here
+  takes — is rejected. `start_date`/`end_date` are therefore required
+  parameters on this tool.
+- **The response is camelCase, not the snake_case in the spec.** Actual keys:
+  `domainName` (not `domain`), `policy`, `spf`, `dkim`, `dmarc`, `bimi`,
+  `volume`, `spfPassRate`, `dkimPassRate`, `dmarcCompliance`, `domainGroup`,
+  `domainLogoUrl`, `domainVerified`, `type`, plus an undocumented `labels`.
+- **`policy` agrees with `/v1/domains`.** Both returned the same 56 domains
+  with identical values (55 `reject`, 1 `quarantine`); no disagreement. The
+  spec's fifth value `invalid` did not appear on either endpoint on this
+  account, so whether they diverge on a malformed DMARC record is still
+  untested — there was no such domain to try.
+- **The date range moves volume and compliance, not the record statuses.**
+  Widening the window from one month to nine changed `volume` on 52 of 56
+  domains and left `spf`/`dkim`/`dmarc`/`bimi`/`policy` unchanged on all 56.
+  The statuses are current state; the numbers are windowed.
+- **Observed status values were `valid` and `missing`** — spf 55 valid /
+  1 missing, dkim 44/12, dmarc 56 valid, bimi 1 valid / 55 missing. The
+  spec's `no-record` and `warning` did not occur on this account, so treat
+  the set as open rather than closed.
+- **`filters` does filter server-side, and `meta.total` follows it.**
+  `{"field": "domain_type", "operator": "eq", "value": "sending"}` returned
+  51 of 56 with `total: 51`; a composite `{"operator": "AND", "conditions":
+  [...]}` works too. Note the field names are snake_case and differ from the
+  response keys — `domain_type`, not `type`. The full allowed set is on the
+  tool's `filters` description.
+- **Pagination is real and `meta` carries a total.** `pageSize: 10` gave
+  `{total: 56, page: 1, pageCount: 6, hasNextPage: true}` and page 2 returned
+  the next 10. A census can be checked against `meta.total`.
+- **`dmarcCompliance` is per-domain for the requested window**, shaped
+  `{compliant: {value, percentage, trend}, nonCompliant: {...},
+  overallCompliance}` — note `nonCompliant`, not the spec's `none_compliant`.
+  `percentage` there is a period-over-period change (it can exceed 100 and go
+  negative), not a share of volume; `overallCompliance` is the share.
