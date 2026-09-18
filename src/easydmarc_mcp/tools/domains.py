@@ -81,11 +81,13 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
             int,
             Field(
                 description=(
-                    "Items per page (max 100). Always send this — EasyDMARC's own "
-                    "default is 1 record per page."
+                    "Items per page, 1-50. Always send this — EasyDMARC's own "
+                    "default is 1 record per page. Keep it near 20: this "
+                    "endpoint is slow and large pages both overrun the "
+                    "response size cap and time out upstream."
                 ),
                 ge=1,
-                le=100,
+                le=50,
             ),
         ] = 20,
         filters: Annotated[

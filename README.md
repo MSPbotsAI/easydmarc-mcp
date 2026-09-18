@@ -101,7 +101,7 @@ Missing either header returns `401`:
 | organizations | `easydmarc_list_organizations` | 列出该 partner 下的客户组织 | GET /v1/organizations | page, limit, order |
 | organizations | `easydmarc_get_organization` | 按 ID 获取一个组织详情 | GET /v1/organizations/{id} | organization_id(必填) |
 | domains | `easydmarc_list_domains` | 列出某组织下已接入的域名 | GET /v1/domains | organization_id(必填), page, page_size |
-| domains | `easydmarc_get_domains_overview` | 列出域名并附带 DMARC policy 与 SPF/DKIM/DMARC/BIMI 记录校验状态、流量与合规率 | POST /v1/domains/overview | organization_id(必填), start_date(必填, MM/DD/YYYY), end_date(必填, MM/DD/YYYY), page, page_size, filters |
+| domains | `easydmarc_get_domains_overview` | 列出域名并附带 DMARC policy 与 SPF/DKIM/DMARC/BIMI 记录校验状态、流量与合规率 | POST /v1/domains/overview | organization_id(必填), start_date(必填, MM/DD/YYYY), end_date(必填, MM/DD/YYYY), page, page_size(≤50), filters |
 | domains | `easydmarc_get_domain` | 获取单个域名的接入详情 | GET /v1/domains/{domain} | organization_id(必填), domain(必填) |
 | domains | `easydmarc_create_domain` | 接入新域名 | POST /v1/domains | organization_id(必填), domain(必填), type, group_id |
 | domains | `easydmarc_update_domain` | 部分更新域名类型/分组 | PATCH /v1/domains/{domain} | domain(必填), domain_name, type, group_id |
@@ -277,3 +277,17 @@ section over the spec where they disagree.
   overallCompliance}` — note `nonCompliant`, not the spec's `none_compliant`.
   `percentage` there is a period-over-period change (it can exceed 100 and go
   negative), not a share of volume; `overallCompliance` is the share.
+- **⚠️ `/v1/domains/overview` is slow, and the page size has a narrow usable
+  window.** Measured on a 56-domain organization over a one-month range:
+
+  | `page_size` | latency | response size | outcome |
+  |---|---|---|---|
+  | 20 | 15s | 9,854 chars | ok |
+  | 40 | 56s | 19,933 chars | ok, but at the 20,000-char cap |
+  | 50 | 59s | — | ok |
+  | 56 (full set) | 127s | — | **`upstream_error`** — upstream read timeout, 3 retries |
+
+  So the whole census cannot be fetched in one call for an org this size, and
+  a large page breaches both the response cap and the SOP's 120s budget. The
+  tool caps `page_size` at 50 and defaults to 20; page through with
+  `meta.hasNextPage` / `meta.total`, or narrow with `filters` first.
