@@ -115,14 +115,16 @@ Missing either header returns `401`:
 | dns lookup | `easydmarc_lookup_bimi` | 实时查询 BIMI 记录 | GET /v1/dns-lookup/bimi | domain(必填), max_age_ms |
 | dns lookup | `easydmarc_lookup_tls_rpt` | 实时查询 TLS-RPT 记录 | GET /v1/dns-lookup/tls-rpt | domain(必填), max_age_ms |
 | dns lookup | `easydmarc_lookup_mta_sts` | 实时查询并校验 MTA-STS 记录+策略文件 | GET /v1/dns-lookup/mta-sts | domain(必填), max_age_ms |
-| rua reports | `easydmarc_get_rua_reports` | 列出原始 RUA(聚合)报告记录 | POST /v1/dmarc/rua/reports | domain_names(必填), report_type(必填), date_from(必填), date_to(必填) |
-| rua reports | `easydmarc_get_rua_report` | 按 UUID 获取单条 RUA 报告 | GET /v1/dmarc/rua/reports/{id} | report_id(必填) |
-| rua reports | `easydmarc_get_rua_auth_pass_rates` | 获取 SPF/DKIM 认证通过率 | POST /v1/dmarc/rua/auth-pass-rates | domains_with_report_types(必填), date_from(必填), date_to(必填) |
-| rua reports | `easydmarc_get_rua_volume` | 获取邮件总量（按字段分组） | POST /v1/dmarc/rua/volume | domains_with_report_types(必填), date_from(必填), date_to(必填) |
-| rua reports | `easydmarc_get_rua_volume_history` | 获取按天/周/月分桶的邮件量趋势 | POST /v1/dmarc/rua/volume-history | domains_with_report_types(必填), date_from(必填), date_to(必填) |
+| rua reports | `easydmarc_get_rua_reports` | 列出原始 RUA(聚合)报告记录 | POST /v1/dmarc/rua/reports | organization_id(必填), domain_names(必填), report_type(必填), date_from(必填), date_to(必填) |
+| rua reports | `easydmarc_get_rua_report` | 按 UUID 获取单条 RUA 报告 | GET /v1/dmarc/rua/reports/{id} | organization_id(必填), report_id(必填) |
+| rua reports | `easydmarc_get_rua_auth_pass_rates` | 获取 SPF/DKIM 认证通过率 | POST /v1/dmarc/rua/auth-pass-rates | organization_id(必填), domains_with_report_types(必填), date_from(必填), date_to(必填) |
+| rua reports | `easydmarc_get_rua_volume` | 获取邮件总量（按字段分组） | POST /v1/dmarc/rua/volume | organization_id(必填), domains_with_report_types(必填), date_from(必填), date_to(必填) |
+| rua reports | `easydmarc_get_rua_volume_history` | 获取按天/周/月分桶的邮件量趋势 | POST /v1/dmarc/rua/volume-history | organization_id(必填), domains_with_report_types(必填), date_from(必填), date_to(必填) |
 | failure reports | `easydmarc_get_failure_reports` | 列出 RUF(取证)失败报告 | GET /v1/dmarc/failure-reports | organization_id(必填), domains(必填) |
 | failure reports | `easydmarc_get_failure_report` | 按 ID 获取单条失败报告详情 | GET /v1/dmarc/failure-reports/{id} | organization_id(必填), report_id(必填) |
 | failure reports | `easydmarc_get_failure_report_aggregates` | 按维度聚合失败报告统计（谁发的失败邮件最多） | GET /v1/dmarc/failure-reports/aggregates | organization_id(必填), domains(必填), dimensions(必填) |
+
+`easydmarc_get_rua_*` 五个工具全部按组织隔离：EasyDMARC 对缺 `organizationId` 的请求一律回 422（`details` 里点名该字段），所以 `organization_id` 是必填，先用 `easydmarc_list_organizations` 取。
 
 `easydmarc_get_rua_*` 四个分析类工具的 `filters` 参数、`easydmarc_get_rua_volume*` 的 `group_by_fields` 等高级过滤/分组字段，本工具未做完整枚举校验，透传给 EasyDMARC API 自身校验——详见下方 Known Gaps。
 

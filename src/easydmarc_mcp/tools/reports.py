@@ -6,7 +6,10 @@ Verified against EasyDMARC's own published OpenAPI spec
 checked 2026-08-28). Scope note: the spec's rua/aggregations and
 rua/properties endpoints are intentionally out of scope for this build —
 they overlap with rua/auth-pass-rates and rua/volume for the same
-underlying data, sliced differently; see README Known Gaps. The `filters`
+underlying data, sliced differently; see README Known Gaps. Every one of
+these endpoints is organization-scoped: EasyDMARC rejects a request with no
+organizationId with a 422 whose details name the missing property, so
+organization_id is a required parameter on every tool here. The `filters`
 advanced-query object (an EasyDMARC-defined operator DSL keyed by field
 name — eq/ne/in/nin/gt/lt/etc.) is accepted as a raw passthrough dict
 rather than fully modeled — EasyDMARC's own API validates it and returns a
@@ -29,6 +32,10 @@ _REPORT_TYPE_DESC = (
     "failed DMARC and was not quarantined/rejected; \"threat-unknown\" — "
     'suspicious, not attributable to a known sender; "forwarded" — passed '
     "through an intermediary (mailing list, forwarder)."
+)
+_ORG_ID_DESC = (
+    'Organization ID, e.g. "org_6464de38ebf5b013b1928408" — resolve via '
+    "easydmarc_list_organizations first, never guess one."
 )
 _DATE_DESC = "ISO 8601 timestamp, e.g. \"2026-08-01T00:00:00.000Z\"."
 _FILTERS_DESC = (
@@ -67,6 +74,7 @@ _RuaField = Literal[
 def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None]) -> None:
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def easydmarc_get_rua_reports(
+        organization_id: Annotated[str, Field(description=_ORG_ID_DESC)],
         domain_names: Annotated[list[str], Field(description="Fully qualified domain names to include.")],
         report_type: Annotated[
             Literal["dmarc-capable", "non-compliant", "threat-unknown", "forwarded"],
@@ -95,6 +103,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
         if client is None:
             return NO_TOKEN
         body: dict = {
+            "organizationId": organization_id,
             "domainNames": domain_names,
             "reportType": report_type,
             "dateRange": {"from": date_from, "to": date_to},
@@ -112,6 +121,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def easydmarc_get_rua_report(
+        organization_id: Annotated[str, Field(description=_ORG_ID_DESC)],
         report_id: Annotated[
             str, Field(description="UUID of the RUA report — resolve via easydmarc_get_rua_reports first.")
         ],
@@ -123,13 +133,17 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
         if client is None:
             return NO_TOKEN
         try:
-            result = await client.get(f"/v1/dmarc/rua/reports/{report_id}")
+            result = await client.get(
+                f"/v1/dmarc/rua/reports/{report_id}",
+                params={"organizationId": organization_id},
+            )
             return dump_json_capped(result)
         except EasyDMARCError as e:
             return e.to_envelope()
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def easydmarc_get_rua_auth_pass_rates(
+        organization_id: Annotated[str, Field(description=_ORG_ID_DESC)],
         domains_with_report_types: Annotated[list[dict], Field(description=_DOMAINS_WITH_TYPES_DESC)],
         date_from: Annotated[str, Field(description=_DATE_DESC)],
         date_to: Annotated[str, Field(description=_DATE_DESC)],
@@ -147,6 +161,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
         if client is None:
             return NO_TOKEN
         body: dict = {
+            "organizationId": organization_id,
             "domainsWithReportTypes": domains_with_report_types,
             "dateRange": {"from": date_from, "to": date_to},
             "filters": filters or {},
@@ -161,6 +176,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def easydmarc_get_rua_volume(
+        organization_id: Annotated[str, Field(description=_ORG_ID_DESC)],
         domains_with_report_types: Annotated[list[dict], Field(description=_DOMAINS_WITH_TYPES_DESC)],
         date_from: Annotated[str, Field(description=_DATE_DESC)],
         date_to: Annotated[str, Field(description=_DATE_DESC)],
@@ -182,6 +198,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
         if client is None:
             return NO_TOKEN
         body: dict = {
+            "organizationId": organization_id,
             "domainsWithReportTypes": domains_with_report_types,
             "dateRange": {"from": date_from, "to": date_to},
             "filters": filters or {},
@@ -198,6 +215,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
 
     @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
     async def easydmarc_get_rua_volume_history(
+        organization_id: Annotated[str, Field(description=_ORG_ID_DESC)],
         domains_with_report_types: Annotated[list[dict], Field(description=_DOMAINS_WITH_TYPES_DESC)],
         date_from: Annotated[str, Field(description=_DATE_DESC)],
         date_to: Annotated[str, Field(description=_DATE_DESC)],
@@ -220,6 +238,7 @@ def register(mcp: FastMCP, client_factory: Callable[[], EasyDMARCClient | None])
         if client is None:
             return NO_TOKEN
         body: dict = {
+            "organizationId": organization_id,
             "domainsWithReportTypes": domains_with_report_types,
             "dateRange": {"from": date_from, "to": date_to},
             "period": period,

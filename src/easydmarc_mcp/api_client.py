@@ -54,6 +54,30 @@ def _classify(status_code: int) -> tuple[str, bool]:
     return "invalid_argument", False
 
 
+def _format_error_details(details: Any) -> str:
+    """Render EasyDMARC's `details` validation array as a compact string.
+
+    Shape per its own error responses: [{"property": <field>, "messages":
+    [<text>, ...]}, ...]. Anything unexpected is stringified rather than
+    dropped — an unparsed detail is still more useful than none.
+    """
+    if not details:
+        return ""
+    if not isinstance(details, list):
+        return str(details)
+    parts: list[str] = []
+    for item in details:
+        if isinstance(item, dict):
+            prop = item.get("property") or item.get("field") or ""
+            messages = item.get("messages") or item.get("message") or ""
+            if isinstance(messages, list):
+                messages = "; ".join(str(m) for m in messages)
+            parts.append(f"{prop}: {messages}" if prop else str(messages))
+        else:
+            parts.append(str(item))
+    return " | ".join(part for part in parts if part)
+
+
 class EasyDMARCError(Exception):
     def __init__(self, status_code: int, message: str):
         self.status_code = status_code
@@ -217,7 +241,15 @@ class EasyDMARCClient:
         try:
             detail = resp.json()
             if isinstance(detail, dict):
-                return str(detail.get("message") or detail.get("error") or detail)
+                summary = str(detail.get("message") or detail.get("error") or detail)
+                # EasyDMARC's validation failures (422) carry the only
+                # actionable part in `details` — `error` is the bare reason
+                # phrase ("Unprocessable Entity"), identical for every
+                # malformed request. Dropping `details` turned a
+                # "organizationId is required" into an opaque envelope an
+                # agent could not act on, so fold it into the message.
+                fields = _format_error_details(detail.get("details"))
+                return f"{summary}: {fields}" if fields else summary
             return str(detail)
         except ValueError:
             return resp.text

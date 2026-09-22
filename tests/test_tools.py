@@ -44,20 +44,20 @@ EXPECTED_TOOLS = {
     "easydmarc_lookup_mta_sts": ({"domain"}, {"readOnlyHint"}),
     # rua reports
     "easydmarc_get_rua_reports": (
-        {"domain_names", "report_type", "date_from", "date_to"},
+        {"organization_id", "domain_names", "report_type", "date_from", "date_to"},
         {"readOnlyHint"},
     ),
-    "easydmarc_get_rua_report": ({"report_id"}, {"readOnlyHint"}),
+    "easydmarc_get_rua_report": ({"organization_id", "report_id"}, {"readOnlyHint"}),
     "easydmarc_get_rua_auth_pass_rates": (
-        {"domains_with_report_types", "date_from", "date_to"},
+        {"organization_id", "domains_with_report_types", "date_from", "date_to"},
         {"readOnlyHint"},
     ),
     "easydmarc_get_rua_volume": (
-        {"domains_with_report_types", "date_from", "date_to"},
+        {"organization_id", "domains_with_report_types", "date_from", "date_to"},
         {"readOnlyHint"},
     ),
     "easydmarc_get_rua_volume_history": (
-        {"domains_with_report_types", "date_from", "date_to"},
+        {"organization_id", "domains_with_report_types", "date_from", "date_to"},
         {"readOnlyHint"},
     ),
     # failure reports
@@ -258,3 +258,92 @@ async def test_domains_overview_sends_only_the_documented_body_keys():
         "page",
         "pageSize",
     }
+
+
+@pytest.mark.asyncio
+async def test_rua_tools_all_send_organization_id():
+    """Regression guard for the 422 that made every RUA tool unusable.
+
+    EasyDMARC scopes all /v1/dmarc/rua/* endpoints to an organization and
+    answers a request without organizationId with
+    422 details=[{property: organizationId}] — regardless of how well-formed
+    the rest of the body is. reports.py shipped without the field, so
+    easydmarc_get_rua_volume (and its four siblings) failed on every call.
+    """
+    from mcp.server.fastmcp import FastMCP
+
+    from easydmarc_mcp.tools import reports
+
+    captured = {}
+
+    class _StubClient:
+        async def post(self, path, params=None, json_body=None):
+            captured[path] = {"body": json_body, "params": params}
+            return {"data": [], "meta": {"total": 0}}
+
+        async def get(self, path, params=None):
+            captured[path] = {"body": None, "params": params}
+            return {"data": {}}
+
+    dates = {"date_from": "2026-08-01T00:00:00.000Z", "date_to": "2026-09-01T00:00:00.000Z"}
+    domains_with_types = [{"domainName": "example.com", "reportTypes": ["dmarc-capable"]}]
+    calls = [
+        ("easydmarc_get_rua_reports",
+         {"organization_id": "org_1", "domain_names": ["example.com"],
+          "report_type": "dmarc-capable", **dates}),
+        ("easydmarc_get_rua_report", {"organization_id": "org_1", "report_id": "uuid-1"}),
+        ("easydmarc_get_rua_auth_pass_rates",
+         {"organization_id": "org_1", "domains_with_report_types": domains_with_types, **dates}),
+        ("easydmarc_get_rua_volume",
+         {"organization_id": "org_1", "domains_with_report_types": domains_with_types, **dates}),
+        ("easydmarc_get_rua_volume_history",
+         {"organization_id": "org_1", "domains_with_report_types": domains_with_types, **dates}),
+    ]
+
+    mcp = FastMCP(name="test")
+    reports.register(mcp, lambda: _StubClient())
+    for name, args in calls:
+        captured.clear()
+        await mcp.call_tool(name, args)
+        assert len(captured) == 1, f"{name}: expected exactly one request, got {list(captured)}"
+        path, sent = next(iter(captured.items()))
+        # The single-report GET carries it as a query param, the four POSTs
+        # in the body — either placement satisfies EasyDMARC.
+        where = sent["body"] or sent["params"] or {}
+        assert where.get("organizationId") == "org_1", f"{name}: no organizationId in {path}"
+
+
+def test_error_message_keeps_easydmarc_validation_details():
+    """A 422 body's `error` is the bare reason phrase, identical for every
+    malformed request; only `details` says what was actually wrong. Folding
+    it into the message is what turns an opaque envelope into something an
+    agent can fix.
+    """
+    import httpx
+
+    from easydmarc_mcp.api_client import EasyDMARCClient
+
+    client = EasyDMARCClient("id", "secret", "https://api2.easydmarc.com")
+    resp = httpx.Response(
+        422,
+        json={
+            "statusCode": 422,
+            "error": "Unprocessable Entity",
+            "traceId": "t-1",
+            "details": [{"property": "organizationId", "messages": ["Organization ID is required"]}],
+        },
+    )
+    message = client._extract_error(resp)
+    assert "Unprocessable Entity" in message
+    assert "organizationId" in message
+    assert "Organization ID is required" in message
+
+
+def test_error_message_without_details_is_unchanged():
+    import httpx
+
+    from easydmarc_mcp.api_client import EasyDMARCClient
+
+    client = EasyDMARCClient("id", "secret", "https://api2.easydmarc.com")
+    resp = httpx.Response(404, json={"message": "Not Found"})
+    assert client._extract_error(resp) == "Not Found"
